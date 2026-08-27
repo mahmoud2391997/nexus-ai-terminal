@@ -3,8 +3,8 @@ import type { Metadata, Viewport } from 'next'
 import './globals.css'
 
 export const metadata: Metadata = {
-  title: 'v0 App',
-  description: 'Created with v0',
+  title: 'Nexus AI Terminal',
+  description: 'A permissioned AI terminal for search, planning, and action.',
   generator: 'v0.app',
   icons: {
     icon: [

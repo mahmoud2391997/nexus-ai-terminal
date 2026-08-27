@@ -1,48 +1,67 @@
 import { NextResponse } from 'next/server'
-import { createTaskInput, getCurrentTimeInput, searchWebInput, executeTool } from '@/src/agent/tools'
+import { toolRegistry } from '@/src/agent/tools'
 import { buildContext } from '@/src/agent/engine'
 import { evaluateToolPolicy } from '@/src/agent/policy'
+import { runTool } from '@/src/agent/core/runner'
+import { getOrCreateConversation } from '@/src/agent/store'
+import { getSessionUserId } from '@/src/lib/session'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-type ReqBody = { tool?: string; input?: unknown; conversationId?: string; userId?: string }
+type ReqBody = {
+  tool?: string
+  input?: unknown
+  conversationId?: string
+}
 
 export async function POST(request: Request) {
+  const userId = await getSessionUserId()
+  if (!userId) return NextResponse.json({ error: 'Unauthorized.' }, { status: 401 })
+
   const body = (await request.json().catch(() => null)) as ReqBody | null
-  if (!body || typeof body !== 'object' || typeof body.tool !== 'string') {
+  if (!body || typeof body.tool !== 'string') {
     return NextResponse.json({ error: 'A tool name is required.' }, { status: 400 })
   }
-  const schemas = {
-    getCurrentTime: getCurrentTimeInput,
-    createTask: createTaskInput,
-    searchWeb: searchWebInput,
-  } as const
-  const toolName = body.tool as keyof typeof schemas
-  const schema = schemas[toolName]
-  if (!schema) return NextResponse.json({ error: 'Tool unavailable.' }, { status: 404 })
+
+  const toolName = body.tool as keyof typeof toolRegistry
+  const tool = toolRegistry[toolName]
+  if (!tool) return NextResponse.json({ error: 'Tool unavailable.' }, { status: 404 })
+
   const policy = evaluateToolPolicy(toolName)
   if (!policy.allowed) return NextResponse.json({ error: policy.reason ?? 'Blocked by policy.' }, { status: 403 })
-  const parsed = schema.safeParse(body.input ?? {})
-  if (!parsed.success) return NextResponse.json({ error: 'Invalid tool input.', issues: parsed.error.issues }, { status: 422 })
-  if (policy.requiresApproval) {
-    return NextResponse.json({
-      ok: true,
-      tool: body.tool,
-      input: parsed.data,
-      status: 'WAITING_APPROVAL' as const,
-      message: 'This tool requires explicit user approval before execution. Use /api/approve after collecting approval.',
-    })
+
+  if (policy.requiresApproval || tool.requiresApproval) {
+    return NextResponse.json(
+      {
+        ok: true,
+        tool: body.tool,
+        input: body.input,
+        status: 'WAITING_APPROVAL',
+        message: 'This tool requires explicit user approval before execution.',
+      },
+      { status: 200 },
+    )
   }
-  const conversationId = body.conversationId ?? `conv_adhoc_${Date.now()}`
-  const ctx = buildContext(conversationId, body.userId)
-  const result = await executeTool(toolName, parsed.data, ctx)
+
+  const requestedId = typeof body.conversationId === 'string' && body.conversationId.length > 0 ? body.conversationId : undefined
+  let conversation: { id: string }
+  try {
+    conversation = await getOrCreateConversation(userId, undefined, requestedId)
+  } catch {
+    return NextResponse.json({ error: 'Conversation does not belong to this user.' }, { status: 403 })
+  }
+
+  const ctx = buildContext(conversation.id, userId)
+  const result = await runTool(toolName, body.input, ctx)
+
   return NextResponse.json({
     ok: result.ok,
     tool: body.tool,
-    input: parsed.data,
-    status: result.ok ? ('COMPLETED' as const) : ('FAILED' as const),
+    input: body.input,
+    status: result.ok ? 'COMPLETED' : 'FAILED',
+    deduped: result.deduped ?? false,
     data: result.ok ? result.data : undefined,
-    error: result.ok ? undefined : (result as any).error,
+    error: result.ok ? undefined : result.error,
   })
 }

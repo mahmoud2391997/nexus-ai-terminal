@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { SignOutButton } from '@/components/auth-buttons'
 import {
   Activity,
   ArrowUp,
@@ -19,7 +20,6 @@ import {
   MoreHorizontal,
   Play,
   Plus,
-  Search,
   Send,
   ShieldCheck,
   Sparkles,
@@ -34,6 +34,30 @@ declare global {
     SpeechRecognition?: new () => SpeechRecognition
     webkitSpeechRecognition?: new () => SpeechRecognition
   }
+}
+
+type SpeechRecognitionEvent = {
+  results: SpeechRecognitionResultList
+  resultIndex: number
+}
+
+type SpeechRecognition = {
+  continuous: boolean
+  interimResults: boolean
+  lang: string
+  start: () => void
+  stop: () => void
+  abort: () => void
+  onresult: ((event: SpeechRecognitionEvent) => void) | null
+  onend: (() => void) | null
+  onerror: (() => void) | null
+}
+
+export type TerminalUser = {
+  id: string | null
+  name: string | null
+  email: string | null
+  image: string | null
 }
 
 type MessageRole = 'user' | 'nexus' | 'system'
@@ -71,15 +95,13 @@ type ApiState = {
   pendingApprovals: PendingApproval[]
 }
 
-const connections = [
-  { name: 'Gmail', detail: 'Connected', icon: Mail, state: 'connected' },
-  { name: 'Calendar', detail: 'Connected', icon: CalendarDays, state: 'connected' },
-  { name: 'Web search', detail: 'Ready', icon: Globe2, state: 'connected' },
-  { name: 'Telegram', detail: 'Not connected', icon: Send, state: 'idle' },
-]
+type Integration = {
+  name: string
+  detail: string
+  state: 'connected' | 'not_connected' | 'expired'
+}
 
-const DEFAULT_CONV_ID = 'conv_default'
-const DEFAULT_USER_ID = 'user-local'
+const DEFAULT_CONV_ID = ''
 
 const nowFmt = () =>
   new Intl.DateTimeFormat('en', {
@@ -90,7 +112,23 @@ const nowFmt = () =>
 
 const mid = (prefix = 'm') => `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
 
-export function NexusTerminal() {
+type EngineEvent =
+  | { type: 'thinking' }
+  | { type: 'text'; content: string }
+  | { type: 'tool_call'; toolName: string; input: unknown }
+  | { type: 'tool_result'; toolName: string; ok: boolean; data?: unknown; error?: string }
+  | {
+      type: 'approval_requested'
+      approvalId: string
+      toolName: string
+      summary: Record<string, string | undefined>
+    }
+  | { type: 'approval_resolved'; approvalId: string; status: 'APPROVED' | 'REJECTED' }
+  | { type: 'assistant'; content: string }
+  | { type: 'error'; message: string }
+  | { type: 'done' }
+
+export function NexusTerminal({ user }: { user: TerminalUser }) {
   const [messages, setMessages] = useState<Message[]>([
     { id: mid(), role: 'nexus', content: "Hi — I'm Nexus. Ask me the time in a city, add a task, or search the web. Say 'help' for more.", meta: 'Nexus · welcome' },
   ])
@@ -108,8 +146,28 @@ export function NexusTerminal() {
   const [isListening, setIsListening] = useState(false)
   const [isSpeaking, setIsSpeaking] = useState(false)
   const [voiceTranscript, setVoiceTranscript] = useState('')
-  const [voiceSupported, setVoiceSupported] = useState(true)
+  const [voiceSupported, setVoiceSupported] = useState(() =>
+    typeof window === 'undefined'
+      ? true
+      : Boolean(typeof window.SpeechRecognition !== 'undefined' || typeof window.webkitSpeechRecognition !== 'undefined'),
+  )
   const recognitionRef = useRef<SpeechRecognition | null>(null)
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
+
+  const [integrations, setIntegrations] = useState<Integration[]>([])
+
+  useEffect(() => {
+    let alive = true
+    fetch('/api/integrations', { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((json) => {
+        if (alive && json?.integrations) setIntegrations(json.integrations)
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [])
 
   // Load initial state from server (hydrates tasks/activity if already present on server)
   useEffect(() => {
@@ -139,7 +197,6 @@ export function NexusTerminal() {
   useEffect(() => {
     const SpeechRecognitionAPI = typeof window === 'undefined' ? null : window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SpeechRecognitionAPI) {
-      setVoiceSupported(false)
       return
     }
     const recognition = new SpeechRecognitionAPI()
@@ -234,47 +291,98 @@ export function NexusTerminal() {
       const resp = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: value, conversationId, userId: DEFAULT_USER_ID }),
+        body: JSON.stringify({ message: value, conversationId }),
       })
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-      const json = (await resp.json()) as {
-        ok: boolean
-        conversationId: string
-        reply: string
-        state?: ApiState
-      }
-      if (json.conversationId !== conversationId) setConversationId(json.conversationId)
-      // Replace "Thinking…" with tool/system events and final reply
+      if (!resp.ok) throw new Error(`Request failed (${resp.status})`)
+
+      const serverConv = resp.headers.get('x-conversation-id')
+      if (serverConv && serverConv !== conversationId) setConversationId(serverConv)
+
+      // Replace "Thinking…" with a single assistant message that we stream into.
+      let assistantText = ''
+      let sawApproval = false
+      let liveTool = ''
       setMessages((cur) => {
         const withoutThinking = cur.filter((m) => m.id !== thinkingId)
-        const additions: Message[] = []
-        const pa = json.state?.pendingApprovals ?? []
-        if (pa.length > 0) {
-          const latest = pa[0]
-          additions.push({
-            id: mid('sys'),
-            role: 'system',
-            content: `${latest.toolName.toUpperCase()} awaiting approval`,
-            meta: `Approval requested · ${nowFmt()}`,
-          })
-        }
-        additions.push({
-          id: mid('n'),
-          role: 'nexus',
-          content: json.reply,
-          meta: `Nexus · ${nowFmt()}`,
-        })
-        return [...withoutThinking, ...additions]
+        return [...withoutThinking, { id: thinkingId, role: 'nexus', content: '', meta: `Nexus · ${nowFmt()}` }]
       })
-      mergeServerState(json.state)
-      // Speak the reply (only when triggered by voice to avoid spam)
-      if (rawValue !== undefined) speak(json.reply)
-    } catch (err: any) {
+
+      const reader = resp.body?.getReader()
+      if (!reader) throw new Error('Streaming not supported.')
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      const handleEvent = (ev: EngineEvent) => {
+        if (ev.type === 'text') {
+          assistantText += ev.content
+          setMessages((cur) =>
+            cur.map((m) => (m.id === thinkingId ? { ...m, content: assistantText } : m)),
+          )
+        } else if (ev.type === 'tool_call') {
+          liveTool = ev.toolName
+          setMessages((cur) =>
+            cur.map((m) =>
+              m.id === thinkingId ? { ...m, content: assistantText || `Running ${ev.toolName}…` } : m,
+            ),
+          )
+        } else if (ev.type === 'approval_requested') {
+          sawApproval = true
+          const appr: PendingApproval = {
+            id: ev.approvalId,
+            toolName: ev.toolName,
+            summary: ev.summary as PendingApproval['summary'],
+          }
+          setPendingApprovals((prev) => {
+            const next = prev.filter((p) => p.id !== appr.id)
+            return [appr, ...next]
+          })
+        } else if (ev.type === 'assistant' && ev.content) {
+          assistantText = ev.content
+          setMessages((cur) =>
+            cur.map((m) => (m.id === thinkingId ? { ...m, content: ev.content } : m)),
+          )
+        }
+      }
+
+      // Read SSE frames.
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        const frames = buffer.split('\n\n')
+        buffer = frames.pop() ?? ''
+        for (const frame of frames) {
+          const line = frame.split('\n')[0]
+          if (!line.startsWith('data: ')) continue
+          const payload = line.slice(6).trim()
+          if (!payload) continue
+          try {
+            handleEvent(JSON.parse(payload) as EngineEvent)
+          } catch {
+            /* skip malformed frame */
+          }
+        }
+      }
+
+      // Finalize the assistant row: replace empty content with a sensible fallback.
+      setMessages((cur) =>
+        cur.map((m) =>
+          m.id === thinkingId
+            ? { ...m, content: assistantText || (sawApproval ? 'Awaiting your approval.' : 'No response generated.') }
+            : m,
+        ),
+      )
+      if (!assistantText && !sawApproval && !liveTool) {
+        throw new Error('No response received.')
+      }
+      if (rawValue !== undefined && assistantText) speak(assistantText)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'network error'
       setMessages((cur) => {
         const withoutThinking = cur.filter((m) => m.id !== thinkingId)
         return [
           ...withoutThinking,
-          { id: mid('sys'), role: 'system', content: `Request failed: ${err?.message ?? 'network error'}`, meta: 'Error' },
+          { id: mid('sys'), role: 'system', content: `Request failed: ${message}`, meta: 'Error' },
         ]
       })
     } finally {
@@ -307,7 +415,7 @@ export function NexusTerminal() {
           additions.push({
             id: mid('sys'),
             role: 'system',
-            content: `Approved action completed in ${Math.round(Math.random() * 12 + 4) / 10}s`,
+            content: 'Approved action completed.',
             meta: 'Tool execution',
           })
         }
@@ -315,14 +423,34 @@ export function NexusTerminal() {
         return [...withoutThinking, ...additions]
       })
       mergeServerState(json.state)
-    } catch (err: any) {
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'network error'
       setMessages((cur) => {
         const withoutThinking = cur.filter((m) => m.id !== thinkingId)
         return [
           ...withoutThinking,
-          { id: mid('sys'), role: 'system', content: `Approval flow failed: ${err?.message ?? 'network error'}`, meta: 'Error' },
+          { id: mid('sys'), role: 'system', content: `Approval flow failed: ${message}`, meta: 'Error' },
         ]
       })
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  async function toggleTask(t: Task) {
+    const next = t.status === 'completed' ? 'queued' : 'completed'
+    setIsBusy(true)
+    try {
+      const res = await fetch('/api/tasks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskId: t.id, status: next }),
+      })
+      if (!res.ok) return
+      const json = (await res.json()) as { ok: boolean; task: Task }
+      if (json.ok) {
+        setTasks((cur) => cur.map((x) => (x.id === t.id ? { ...x, status: json.task.status } : x)))
+      }
     } finally {
       setIsBusy(false)
     }
@@ -334,6 +462,35 @@ export function NexusTerminal() {
   )
 
   const activeApproval = pendingApprovals[0]
+
+  const integrationState = (name: string): Integration['state'] => {
+    const found = integrations.find((i) => i.name === name)
+    return found?.state ?? 'not_connected'
+  }
+
+  const suggestions = useMemo(() => {
+    const webSearchConnected = integrationState('Web search') === 'connected'
+    const gmailConnected = integrationState('Gmail') === 'connected'
+    const calendarConnected = integrationState('Calendar') === 'connected'
+    const telegramConnected = integrationState('Telegram') === 'connected'
+    const phoneConnected = integrationState('Phone calls') === 'connected'
+    return [
+      { key: 'time', label: 'Get the time', icon: Clock3, prompt: 'What time is it in ', enabled: true },
+      { key: 'task', label: 'Add a task', icon: Check, prompt: 'Add a task: ', enabled: true },
+      { key: 'search', label: 'Search the web', icon: Globe2, prompt: 'Search the web for ', enabled: webSearchConnected, reason: webSearchConnected ? '' : 'Enable web search' },
+      { key: 'email', label: 'Write an email', icon: Mail, prompt: 'Write an email to ', enabled: gmailConnected, reason: gmailConnected ? '' : 'Connect Gmail' },
+      { key: 'calendar', label: 'Schedule in calendar', icon: CalendarDays, prompt: 'Schedule an event for ', enabled: calendarConnected, reason: calendarConnected ? '' : 'Connect Calendar' },
+      { key: 'telegram', label: 'Send a message', icon: Send, prompt: 'Send a message to ', enabled: telegramConnected, reason: telegramConnected ? 'Tool not available yet' : 'Connect Telegram' },
+      { key: 'phone', label: 'Make a call', icon: Bell, prompt: 'Make a call to ', enabled: phoneConnected, reason: phoneConnected ? 'Tool not available yet' : 'Connect a phone provider' },
+    ]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [integrations])
+
+  function pickSuggestion(s: (typeof suggestions)[number]) {
+    if (!s.enabled) return
+    setCommand(s.prompt)
+    requestAnimationFrame(() => inputRef.current?.focus())
+  }
 
   return (
     <main className="min-h-screen bg-background text-foreground selection:bg-primary selection:text-primary-foreground">
@@ -353,16 +510,18 @@ export function NexusTerminal() {
           <span className={`size-1.5 rounded-full ${isBusy ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'}`} />
           {isBusy ? 'PROCESSING' : 'SYSTEM OPERATIONAL'}
         </div>
-        <button
-          className="flex items-center gap-2 rounded-md border border-border px-2 py-1.5 text-sm hover:bg-muted"
-          aria-label="Open account menu"
-        >
-          <div className="flex size-6 items-center justify-center rounded-full bg-accent text-accent-foreground">
-            <UserRound className="size-3.5" />
-          </div>
-          <span className="hidden md:block">Alex Morgan</span>
-          <ChevronDown className="size-3.5 text-muted-foreground" />
-        </button>
+        <div className="flex items-center gap-3">
+          {user.image ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={user.image} alt="" className="size-6 rounded-full bg-accent" />
+          ) : (
+            <div className="flex size-6 items-center justify-center rounded-full bg-accent text-accent-foreground">
+              <UserRound className="size-3.5" />
+            </div>
+          )}
+          <span className="hidden md:block">{user.name || user.email || 'User'}</span>
+          <SignOutButton />
+        </div>
       </header>
 
       <div className="mx-auto grid max-w-[1500px] lg:grid-cols-[220px_minmax(0,1fr)_280px]">
@@ -469,6 +628,7 @@ export function NexusTerminal() {
             <div className="mx-auto max-w-3xl">
               <div className="relative rounded-lg border border-input bg-background shadow-sm focus-within:ring-2 focus-within:ring-ring">
                 <textarea
+                  ref={inputRef}
                   value={command}
                   onChange={(event) => setCommand(event.target.value)}
                   onKeyDown={(event) => {
@@ -531,6 +691,25 @@ export function NexusTerminal() {
                   </button>
                 </div>
               </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {suggestions.map((s) => (
+                  <button
+                    key={s.key}
+                    onClick={() => pickSuggestion(s)}
+                    disabled={!s.enabled}
+                    title={s.enabled ? `Start: ${s.prompt}` : s.reason}
+                    className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition ${
+                      s.enabled
+                        ? 'border-border bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground'
+                        : 'cursor-not-allowed border-dashed border-border text-muted-foreground/40'
+                    }`}
+                  >
+                    <s.icon className="size-3.5" />
+                    <span>{s.label}</span>
+                    {!s.enabled && <span className="opacity-60">· {s.reason}</span>}
+                  </button>
+                ))}
+              </div>
               {(isListening || isSpeaking || voiceTranscript || !voiceSupported) && (
                 <div className="mt-3 rounded-md border border-border bg-muted/40 p-3 text-xs">
                   <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
@@ -587,27 +766,33 @@ export function NexusTerminal() {
               <button className="text-xs text-primary hover:underline">Manage</button>
             </div>
             <div className="space-y-2">
-              {connections.map(({ name, detail, icon: Icon, state }) => (
-                <div
-                  key={name}
-                  className="flex items-center gap-3 rounded-md border border-border bg-card p-3"
-                >
-                  <div className="flex size-8 items-center justify-center rounded-md bg-muted">
-                    <Icon className="size-4 text-muted-foreground" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium">{name}</div>
-                    <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                      <span
-                        className={`size-1.5 rounded-full ${
-                          state === 'connected' ? 'bg-emerald-500' : 'bg-muted-foreground/50'
-                        }`}
-                      />
-                      {detail}
+              {integrations.length === 0 ? (
+                <div className="rounded-md border border-dashed border-border p-3 text-xs text-muted-foreground">
+                  Loading connections…
+                </div>
+              ) : (
+                integrations.map(({ name, detail, state }) => (
+                  <div
+                    key={name}
+                    className="flex items-center gap-3 rounded-md border border-border bg-card p-3"
+                  >
+                    <div className="flex size-8 items-center justify-center rounded-md bg-muted">
+                      <IntegrationIcon name={name} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium">{name}</div>
+                      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                        <span
+                          className={`size-1.5 rounded-full ${
+                            state === 'connected' ? 'bg-emerald-500' : 'bg-muted-foreground/50'
+                          }`}
+                        />
+                        {detail}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </div>
 
@@ -667,34 +852,7 @@ export function NexusTerminal() {
                       className="flex items-start gap-3 rounded-md border border-border bg-card p-3"
                     >
                       <button
-                        onClick={async () => {
-                          const next = t.status === 'completed' ? 'queued' : 'completed'
-                          setIsBusy(true)
-                          try {
-                            const res = await fetch('/api/agent', {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({
-                                tool: 'createTask',
-                                conversationId,
-                                input: { title: t.title, status: next },
-                              }),
-                            })
-                            // Fire-and-forget optimistic toggle; re-sync via /api/state
-                            setTasks((cur) =>
-                              cur.map((x) => (x.id === t.id ? { ...x, status: next } : x)),
-                            )
-                            void res.json()
-                            const state = await fetch(
-                              `/api/state?conversationId=${encodeURIComponent(conversationId)}`,
-                            )
-                              .then((r) => r.json())
-                              .catch(() => null)
-                            if (state?.ok) mergeServerState(state.state)
-                          } finally {
-                            setIsBusy(false)
-                          }
-                        }}
+                        onClick={() => void toggleTask(t)}
                         className={`mt-0.5 flex size-5 shrink-0 items-center justify-center rounded border ${
                           t.status === 'completed'
                             ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600'
@@ -848,4 +1006,22 @@ function ApprovalCard({
       </div>
     </div>
   )
+}
+
+function IntegrationIcon({ name }: { name: string }) {
+  const Icon =
+    name === 'Gmail' || name === 'Calendar'
+      ? name === 'Calendar'
+        ? CalendarDays
+        : Mail
+      : name === 'Web search'
+        ? Globe2
+        : name === 'Telegram'
+          ? Send
+          : name === 'Phone calls'
+            ? Bell
+            : name === 'Voice'
+              ? Mic
+              : Sparkles
+  return <Icon className="size-4 text-muted-foreground" />
 }

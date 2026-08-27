@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { resolveApproval, type EngineEvent } from '@/src/agent/engine'
-import { getFullState } from '@/src/agent/store'
+import { canAccessConversation, getFullState } from '@/src/agent/store'
+import { getSessionUserId } from '@/src/lib/session'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -12,6 +13,9 @@ type ReqBody = {
 }
 
 export async function POST(request: Request) {
+  const userId = await getSessionUserId()
+  if (!userId) return NextResponse.json({ error: 'Unauthorized.' }, { status: 401 })
+
   const body = (await request.json().catch(() => null)) as ReqBody | null
   if (
     !body ||
@@ -24,19 +28,31 @@ export async function POST(request: Request) {
       { status: 400 },
     )
   }
+
+  const allowed = await canAccessConversation(userId, body.conversationId)
+  if (!allowed) return NextResponse.json({ error: 'Unauthorized.' }, { status: 403 })
+
   const events: EngineEvent[] = []
   const result = await resolveApproval(
-    { conversationId: body.conversationId, approvalId: body.approvalId, status: body.status },
-    (ev) => { events.push(ev) },
+    {
+      conversationId: body.conversationId,
+      approvalId: body.approvalId,
+      status: body.status,
+      userId,
+    },
+    (ev) => {
+      events.push(ev)
+    },
   )
   if (!result.ok) {
     return NextResponse.json({ ok: false, error: result.error }, { status: 404 })
   }
+
   return NextResponse.json({
     ok: true,
     status: result.status,
     reply: result.reply,
     events,
-    state: getFullState(body.conversationId),
+    state: await getFullState(body.conversationId),
   })
 }

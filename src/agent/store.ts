@@ -9,6 +9,7 @@ export {
   updateTaskStatus,
   addActivity,
   listActivity,
+  listActivityByUser,
   addPendingApproval,
   getPendingApproval,
   listPendingApprovals,

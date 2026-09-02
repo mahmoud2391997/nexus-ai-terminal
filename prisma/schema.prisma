@@ -258,6 +258,7 @@ model Contact {
 model AuditLog {
   id                String            @id @default(cuid())
   userId            String
+  conversationId    String?
   actorType         ActorType
   action            String
   targetType        String?           // e.g., 'email', 'task', 'automation'
@@ -268,6 +269,7 @@ model AuditLog {
   user              User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   
   @@index([userId, createdAt])
+  @@index([conversationId])
 }
 
 enum ActorType {

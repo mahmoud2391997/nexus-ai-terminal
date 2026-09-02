@@ -19,7 +19,7 @@ export type ActivityEntry = {
   title: string
   detail: string
   kind: 'tool' | 'message' | 'system' | 'approval'
-  conversationId: string
+  conversationId?: string
 }
 
 export type PendingApproval = {
@@ -48,6 +48,7 @@ export type Conversation = {
   title: string | null
   createdAt: string
   updatedAt: string
+  preview?: string
 }
 
 const nowTime = () =>
@@ -94,13 +95,31 @@ export async function listConversations(userId: string): Promise<Conversation[]>
     orderBy: { updatedAt: 'desc' },
     take: 20,
   })
-  return conversations.map((c) => ({
-    id: c.id,
-    userId: c.userId,
-    title: c.title,
-    createdAt: c.createdAt.toISOString(),
-    updatedAt: c.updatedAt.toISOString(),
-  }))
+  const ids = conversations.map((c) => c.id)
+  const messages = ids.length
+    ? await prisma.message.findMany({
+        where: { conversationId: { in: ids } },
+        orderBy: { createdAt: 'asc' },
+        select: { conversationId: true, content: true },
+      })
+    : []
+  const byConversation = new Map<string, string[]>()
+  for (const m of messages) {
+    const list = byConversation.get(m.conversationId) ?? []
+    list.push(m.content)
+    byConversation.set(m.conversationId, list)
+  }
+  return conversations.map((c) => {
+    const content = (byConversation.get(c.id) ?? []).join(' ').trim()
+    return {
+      id: c.id,
+      userId: c.userId,
+      title: c.title,
+      createdAt: c.createdAt.toISOString(),
+      updatedAt: c.updatedAt.toISOString(),
+      preview: content,
+    }
+  })
 }
 
 export async function addTask(task: Omit<Task, 'id' | 'createdAt'>): Promise<Task> {
@@ -117,6 +136,7 @@ export async function addTask(task: Omit<Task, 'id' | 'createdAt'>): Promise<Tas
   await prisma.auditLog.create({
     data: {
       userId: task.userId,
+      conversationId: task.conversationId ?? undefined,
       actorType: 'ai',
       action: 'task_created',
       targetType: 'task',
@@ -184,6 +204,7 @@ export async function updateTaskStatus(
   await prisma.auditLog.create({
     data: {
       userId,
+      conversationId: existing.conversationId ?? undefined,
       actorType: 'user',
       action: 'task_status_updated',
       targetType: 'task',
@@ -214,29 +235,85 @@ export async function addActivity(entry: Omit<ActivityEntry, 'id' | 'time'>): Pr
   return { ...entry, id, time: entry.kind === 'approval' ? nowTime() : span }
 }
 
-export async function listActivity(conversationId: string): Promise<ActivityEntry[]> {
-  const conversation = await prisma.conversation.findUnique({ where: { id: conversationId } })
-  if (!conversation) return []
+type AuditLogLike = {
+  action: string
+  actorType: string
+  targetType?: string | null
+  targetId?: string | null
+  metadata?: unknown
+}
 
+function describeActivityLog(log: AuditLogLike): { title: string; detail: string } {
+  const md = (log.metadata ?? {}) as Record<string, unknown>
+  const title = log.action.replace(/_/g, ' ')
+  const parts: string[] = []
+
+  if (log.action === 'task_created' && typeof md.title === 'string' && md.title) {
+    parts.push(`Task: ${md.title}`)
+  } else if (log.action === 'task_status_updated') {
+    parts.push(`Status: ${String(md.oldStatus ?? '—')} → ${String(md.newStatus ?? '—')}`)
+  } else if (log.action === 'approval_requested' && typeof md.toolName === 'string') {
+    parts.push(`Approval requested for ${md.toolName}`)
+  } else if (log.action.startsWith('approval_') && typeof md.toolName === 'string') {
+    parts.push(`Approval ${log.action.replace('approval_', '').toUpperCase()} for ${md.toolName}`)
+  } else if ((log.action === 'tool_completed' || log.action === 'tool_failed') && typeof md.toolName === 'string') {
+    parts.push(`Tool: ${md.toolName}${md.ok === true ? ' · succeeded' : md.ok === false ? ' · failed' : ''}`)
+  } else if (log.targetType) {
+    parts.push(log.targetType)
+  }
+
+  if (log.targetId) parts.push(`ID: ${log.targetId}`)
+  return { title, detail: parts.join(' · ') }
+}
+
+export async function listActivity(conversationId: string): Promise<ActivityEntry[]> {
   const logs = await prisma.auditLog.findMany({
-    where: { userId: conversation.userId },
+    where: { conversationId },
     orderBy: { createdAt: 'desc' },
     take: 50,
   })
 
-  return logs.map((log) => ({
-    id: log.id,
-    time: new Intl.DateTimeFormat('en', {
-      hour: 'numeric',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    }).format(log.createdAt),
-    title: log.action.replace(/_/g, ' '),
-    detail: log.targetType || '',
-    kind: 'system' as const,
-    conversationId,
-  }))
+  return logs.map((log) => {
+    const { title, detail } = describeActivityLog(log)
+    return {
+      id: log.id,
+      time: new Intl.DateTimeFormat('en', {
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).format(log.createdAt),
+      title,
+      detail,
+      kind: 'system' as const,
+      conversationId,
+    }
+  })
+}
+
+export async function listActivityByUser(userId: string): Promise<ActivityEntry[]> {
+  const logs = await prisma.auditLog.findMany({
+    where: { userId },
+    orderBy: { createdAt: 'desc' },
+    take: 80,
+  })
+
+  return logs.map((log) => {
+    const { title, detail } = describeActivityLog(log)
+    return {
+      id: log.id,
+      time: new Intl.DateTimeFormat('en', {
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).format(log.createdAt),
+      title,
+      detail,
+      kind: 'system' as const,
+      conversationId: log.conversationId ?? undefined,
+    }
+  })
 }
 
 export async function addPendingApproval(p: Omit<PendingApproval, 'id' | 'createdAt'>): Promise<PendingApproval> {
@@ -255,6 +332,7 @@ export async function addPendingApproval(p: Omit<PendingApproval, 'id' | 'create
   await prisma.auditLog.create({
     data: {
       userId: p.context.userId,
+      conversationId: p.conversationId || undefined,
       actorType: 'ai',
       action: 'approval_requested',
       targetType: 'approval',
@@ -346,6 +424,7 @@ export async function resolveApprovalStatus(
   await prisma.auditLog.create({
     data: {
       userId,
+      conversationId: approval.conversationId ?? undefined,
       actorType: 'user',
       action: `approval_${status.toLowerCase()}`,
       targetType: 'approval',

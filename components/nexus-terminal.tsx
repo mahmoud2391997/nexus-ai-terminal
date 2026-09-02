@@ -9,24 +9,25 @@ import {
   CalendarDays,
   Check,
   ChevronDown,
-  Clock3,
   Command,
   FileText,
   Globe2,
   LoaderCircle,
   LockKeyhole,
   Mail,
+  MessageCircle,
   Mic,
   MoreHorizontal,
   Play,
   Plus,
-  Send,
+  Search,
   ShieldCheck,
   Sparkles,
   TerminalSquare,
   UserRound,
-  X,
   Volume2,
+  Wrench,
+  X,
 } from 'lucide-react'
 
 declare global {
@@ -73,6 +74,8 @@ type ActivityEntry = {
   time: string
   title: string
   detail: string
+  kind?: string
+  conversationId?: string
 }
 
 type Task = {
@@ -81,6 +84,7 @@ type Task = {
   status: 'queued' | 'in_progress' | 'completed'
   dueAt?: string
   createdAt: string
+  conversationId?: string | null
 }
 
 type PendingApproval = {
@@ -99,6 +103,14 @@ type Integration = {
   name: string
   detail: string
   state: 'connected' | 'not_connected' | 'expired'
+}
+
+type ConversationSummary = {
+  id: string
+  title: string | null
+  createdAt: string
+  updatedAt: string
+  preview?: string
 }
 
 const DEFAULT_CONV_ID = ''
@@ -128,9 +140,27 @@ type EngineEvent =
   | { type: 'error'; message: string }
   | { type: 'done' }
 
+function activityVisual(a: { title: string; kind?: string; detail?: string }): {
+  Icon: typeof Activity
+  dot: string
+  tone: string
+} {
+  const text = `${a.title} ${a.detail ?? ''}`.toLowerCase()
+  if (text.includes('approval')) {
+    return { Icon: ShieldCheck, dot: 'bg-amber-500', tone: 'text-amber-600' }
+  }
+  if (text.includes('tool') || text.includes('whatsapp')) {
+    return { Icon: Wrench, dot: text.includes('failed') ? 'bg-rose-500' : 'bg-sky-500', tone: 'text-sky-600' }
+  }
+  if (text.includes('task') || text.includes('email') || text.includes('calendar')) {
+    return { Icon: Check, dot: 'bg-emerald-500', tone: 'text-emerald-600' }
+  }
+  return { Icon: Activity, dot: 'bg-muted-foreground/60', tone: 'text-muted-foreground' }
+}
+
 export function NexusTerminal({ user }: { user: TerminalUser }) {
   const [messages, setMessages] = useState<Message[]>([
-    { id: mid(), role: 'nexus', content: "Hi — I'm Nexus. Ask me the time in a city, add a task, or search the web. Say 'help' for more.", meta: 'Nexus · welcome' },
+    { id: mid(), role: 'nexus', content: "I'll help you get things done — schedule events, manage your calendar, send and search emails, send WhatsApp messages, create tasks, and search the web.", meta: 'Nexus · welcome' },
   ])
   const [command, setCommand] = useState('')
   const [isBusy, setIsBusy] = useState(false)
@@ -142,6 +172,10 @@ export function NexusTerminal({ user }: { user: TerminalUser }) {
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>([])
   const [history, setHistory] = useState<string[]>([])
   const [activeTab, setActiveTab] = useState<'activity' | 'tasks'>('activity')
+  const [globalActivity, setGlobalActivity] = useState<ActivityEntry[]>([])
+  const [globalTasks, setGlobalTasks] = useState<Task[]>([])
+  const [panelModal, setPanelModal] = useState<'activity' | 'tasks' | null>(null)
+  const [expandedActivities, setExpandedActivities] = useState<Set<string>>(new Set())
 
   const [isListening, setIsListening] = useState(false)
   const [isSpeaking, setIsSpeaking] = useState(false)
@@ -155,6 +189,10 @@ export function NexusTerminal({ user }: { user: TerminalUser }) {
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
 
   const [integrations, setIntegrations] = useState<Integration[]>([])
+  const [conversations, setConversations] = useState<ConversationSummary[]>([])
+  const [conversationsLoaded, setConversationsLoaded] = useState(false)
+  const [conversationSearch, setConversationSearch] = useState('')
+  const messagesRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -169,7 +207,25 @@ export function NexusTerminal({ user }: { user: TerminalUser }) {
     }
   }, [])
 
-  // Load initial state from server (hydrates tasks/activity if already present on server)
+  useEffect(() => {
+    void refreshConversations()
+    void refreshGlobalPanels()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Auto-scroll the conversation to the latest message whenever it updates.
+  useEffect(() => {
+    const el = messagesRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [messages])
+
+  // Refresh all-conversation activity/tasks whenever the modal is opened.
+  useEffect(() => {
+    if (panelModal) void refreshGlobalPanels()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panelModal])
+
+  // Load per-conversation state (activity/tasks/approvals for the selected conversation)
   useEffect(() => {
     ;(async () => {
       try {
@@ -177,21 +233,102 @@ export function NexusTerminal({ user }: { user: TerminalUser }) {
         if (!res.ok) return
         const json = (await res.json()) as { ok: boolean; conversationId: string; state: ApiState }
         if (json.ok && json.state) {
-          if (json.state.activity?.length) {
-            setActivity((prev) => {
-              const seen = new Set(prev.map((a) => a.id))
-              const extras = json.state.activity.filter((a) => !seen.has(a.id))
-              return [...extras, ...prev]
-            })
-          }
-          if (json.state.tasks?.length) setTasks(json.state.tasks)
-          if (json.state.pendingApprovals?.length) setPendingApprovals(json.state.pendingApprovals)
+          setActivity(Array.isArray(json.state.activity) ? json.state.activity : [])
+          if (Array.isArray(json.state.tasks)) setTasks(json.state.tasks)
+          if (Array.isArray(json.state.pendingApprovals)) setPendingApprovals(json.state.pendingApprovals)
         }
       } catch {
         /* no-op, offline graceful */
       }
     })()
   }, [conversationId])
+
+  async function loadConversation(convId: string) {
+    try {
+      const res = await fetch(`/api/state?conversationId=${encodeURIComponent(convId)}`, { cache: 'no-store' })
+      if (!res.ok) return
+      const json = (await res.json()) as { ok: boolean; conversationId: string; state: ApiState & { messages?: unknown[] } }
+      if (json.ok && json.state) {
+        setConversationId(convId)
+        const mapped: Message[] = (json.state.messages ?? [])
+          .map((m) => {
+            const role = (m as { role?: string }).role
+            if (role === 'assistant') {
+              return { id: (m as { id: string }).id ?? mid('n'), role: 'nexus', content: (m as { content?: string }).content ?? '' }
+            }
+            if (role === 'user') {
+              return { id: (m as { id: string }).id ?? mid('u'), role: 'user', content: (m as { content?: string }).content ?? '' }
+            }
+            if (role === 'system') {
+              return { id: (m as { id: string }).id ?? mid('sys'), role: 'system', content: (m as { content?: string }).content ?? '' }
+            }
+            return null // skip tool/internal messages in the conversation view
+          })
+          .filter((m): m is Message => m !== null)
+        setMessages(mapped.length ? mapped : [{ id: mid(), role: 'nexus', content: 'This conversation is empty. Ask me anything.', meta: 'Nexus' }])
+        setHistory([])
+        if (Array.isArray(json.state.tasks)) setTasks(json.state.tasks)
+        if (Array.isArray(json.state.pendingApprovals)) setPendingApprovals(json.state.pendingApprovals)
+        if (Array.isArray(json.state.activity)) setActivity(json.state.activity)
+      }
+    } catch {
+      /* no-op */
+    }
+  }
+
+  async function refreshConversations() {
+    try {
+      const res = await fetch('/api/state', { cache: 'no-store' })
+      if (!res.ok) return
+      const json = (await res.json()) as { ok: boolean; conversations?: ConversationSummary[] }
+      if (json.ok && Array.isArray(json.conversations)) {
+        setConversations(json.conversations)
+      }
+    } catch {
+      /* no-op */
+    } finally {
+      setConversationsLoaded(true)
+    }
+  }
+
+  async function refreshGlobalPanels() {
+    try {
+      const [tasksRes, activityRes] = await Promise.all([
+        fetch('/api/tasks', { cache: 'no-store' }),
+        fetch('/api/activity', { cache: 'no-store' }),
+      ])
+      if (tasksRes.ok) {
+        const json = (await tasksRes.json()) as { ok: boolean; tasks?: Task[] }
+        if (json.ok && Array.isArray(json.tasks)) setGlobalTasks(json.tasks)
+      }
+      if (activityRes.ok) {
+        const json = (await activityRes.json()) as { ok: boolean; activity?: ActivityEntry[] }
+        if (json.ok && Array.isArray(json.activity)) {
+          setGlobalActivity(json.activity)
+          setExpandedActivities(new Set(json.activity.map((a) => a.id)))
+        }
+      }
+    } catch {
+      /* no-op */
+    }
+  }
+
+  function newConversation() {
+    const newId = `conv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
+    setConversationId(newId)
+    setMessages([
+      {
+        id: mid(),
+        role: 'nexus',
+        content: "New conversation. What can I help with? Try 'help' to see capabilities.",
+        meta: 'Nexus · new session',
+      },
+    ])
+    setTasks([])
+    setActivity([{ id: mid('a'), time: nowFmt(), title: 'Conversation opened', detail: 'New session' }])
+    setPendingApprovals([])
+    setHistory([])
+  }
 
   // Speech recognition + synthesis setup
   useEffect(() => {
@@ -387,6 +524,8 @@ export function NexusTerminal({ user }: { user: TerminalUser }) {
       })
     } finally {
       setIsBusy(false)
+      void refreshConversations()
+      void refreshGlobalPanels()
     }
   }
 
@@ -449,7 +588,9 @@ export function NexusTerminal({ user }: { user: TerminalUser }) {
       if (!res.ok) return
       const json = (await res.json()) as { ok: boolean; task: Task }
       if (json.ok) {
-        setTasks((cur) => cur.map((x) => (x.id === t.id ? { ...x, status: json.task.status } : x)))
+        const updated = { ...t, status: json.task.status as Task['status'] }
+        setTasks((cur) => cur.map((x) => (x.id === t.id ? updated : x)))
+        setGlobalTasks((cur) => cur.map((x) => (x.id === t.id ? updated : x)))
       }
     } finally {
       setIsBusy(false)
@@ -472,15 +613,15 @@ export function NexusTerminal({ user }: { user: TerminalUser }) {
     const webSearchConnected = integrationState('Web search') === 'connected'
     const gmailConnected = integrationState('Gmail') === 'connected'
     const calendarConnected = integrationState('Calendar') === 'connected'
-    const telegramConnected = integrationState('Telegram') === 'connected'
     const phoneConnected = integrationState('Phone calls') === 'connected'
+    const whatsappConnected = integrationState('WhatsApp') === 'connected'
     return [
-      { key: 'time', label: 'Get the time', icon: Clock3, prompt: 'What time is it in ', enabled: true },
+      { key: 'calendar', label: 'Schedule an event', icon: CalendarDays, prompt: 'Schedule an event for ', enabled: calendarConnected, reason: calendarConnected ? '' : 'Connect Calendar' },
+      { key: 'email', label: 'Send an email', icon: Mail, prompt: 'Write an email to ', enabled: gmailConnected, reason: gmailConnected ? '' : 'Connect Gmail' },
+      { key: 'searchEmails', label: 'Search emails', icon: Mail, prompt: 'Search my emails for ', enabled: gmailConnected, reason: gmailConnected ? '' : 'Connect Gmail' },
+      { key: 'whatsapp', label: 'Send a WhatsApp message', icon: MessageCircle, prompt: 'Send a WhatsApp message to ', enabled: whatsappConnected, reason: whatsappConnected ? '' : 'Configure WhatsApp' },
       { key: 'task', label: 'Add a task', icon: Check, prompt: 'Add a task: ', enabled: true },
       { key: 'search', label: 'Search the web', icon: Globe2, prompt: 'Search the web for ', enabled: webSearchConnected, reason: webSearchConnected ? '' : 'Enable web search' },
-      { key: 'email', label: 'Write an email', icon: Mail, prompt: 'Write an email to ', enabled: gmailConnected, reason: gmailConnected ? '' : 'Connect Gmail' },
-      { key: 'calendar', label: 'Schedule in calendar', icon: CalendarDays, prompt: 'Schedule an event for ', enabled: calendarConnected, reason: calendarConnected ? '' : 'Connect Calendar' },
-      { key: 'telegram', label: 'Send a message', icon: Send, prompt: 'Send a message to ', enabled: telegramConnected, reason: telegramConnected ? 'Tool not available yet' : 'Connect Telegram' },
       { key: 'phone', label: 'Make a call', icon: Bell, prompt: 'Make a call to ', enabled: phoneConnected, reason: phoneConnected ? 'Tool not available yet' : 'Connect a phone provider' },
     ]
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -491,6 +632,181 @@ export function NexusTerminal({ user }: { user: TerminalUser }) {
     setCommand(s.prompt)
     requestAnimationFrame(() => inputRef.current?.focus())
   }
+
+  function runSuggestion(s: (typeof suggestions)[number]) {
+    if (!s.enabled) return
+    void submitCommand(s.prompt)
+  }
+
+  const isEmpty = messages.length <= 1
+
+  const inputForm = (
+    <div className="mx-auto w-full max-w-3xl">
+      <div className="mb-3 flex items-center gap-2">
+        <button
+          onClick={isSpeaking ? stopSpeaking : toggleVoice}
+          disabled={!voiceSupported || isBusy}
+          className={`inline-flex flex-1 items-center justify-center gap-2 rounded-full border px-4 py-2.5 text-sm font-medium transition ${
+            isListening
+              ? 'animate-pulse border-destructive/40 bg-destructive/10 text-destructive'
+              : isSpeaking
+                ? 'border-primary/40 bg-primary/10 text-primary'
+                : 'border-border bg-muted/40 text-foreground hover:bg-muted'
+          } disabled:cursor-not-allowed disabled:opacity-40`}
+          aria-label={
+            !voiceSupported
+              ? 'Voice conversation unsupported'
+              : isSpeaking
+                ? 'Stop speaking'
+                : isListening
+                  ? 'Stop voice conversation'
+                  : 'Start a voice conversation'
+          }
+        >
+          {isListening ? (
+            <X className="size-4" />
+          ) : isSpeaking ? (
+            <Volume2 className="size-4" />
+          ) : (
+            <Mic className="size-4" />
+          )}
+          <span>
+            {!voiceSupported
+              ? 'Voice unavailable (try Chrome/Edge)'
+              : isSpeaking
+                ? 'Nexus is speaking… tap to stop'
+                : isListening
+                  ? 'Listening… tap to stop'
+                  : 'Start a voice conversation'}
+          </span>
+        </button>
+      </div>
+      <div className="relative rounded-lg border border-input bg-background shadow-sm focus-within:ring-2 focus-within:ring-ring">
+        <textarea
+          ref={inputRef}
+          value={command}
+          onChange={(event) => setCommand(event.target.value)}
+          onKeyDown={(event) => {
+            if (
+              event.key === 'Enter' &&
+              !event.shiftKey &&
+              !event.nativeEvent.isComposing &&
+              (event as any).keyCode !== 229
+            ) {
+              event.preventDefault()
+              void submitCommand()
+            }
+          }}
+          placeholder="Type a command for Nexus… (try: help / time in Tokyo / add task: design review / search Next.js 16)"
+          className="min-h-14 w-full resize-none bg-transparent px-4 pb-12 pt-3 text-sm outline-none placeholder:text-muted-foreground"
+          aria-label="Command input"
+          disabled={isBusy}
+        />
+        <div className="absolute bottom-2 left-3 flex items-center gap-1 text-[11px] text-muted-foreground">
+          <kbd className="rounded border border-border px-1.5 py-0.5 font-mono">↵</kbd> send{' '}
+          <span className="mx-1">·</span>
+          <kbd className="rounded border border-border px-1.5 py-0.5 font-mono">⇧ ↵</kbd> new line
+        </div>
+        <div className="absolute bottom-2 right-2 flex items-center gap-1">
+          <button
+            onClick={isSpeaking ? stopSpeaking : toggleVoice}
+            disabled={!voiceSupported || isBusy}
+            className={`rounded-md p-2 ${
+              isListening
+                ? 'bg-destructive/10 text-destructive'
+                : isSpeaking
+                  ? 'bg-primary/10 text-primary'
+                  : 'text-muted-foreground hover:bg-muted'
+            } disabled:cursor-not-allowed disabled:opacity-40`}
+            aria-label={
+              !voiceSupported
+                ? 'Voice input unsupported'
+                : isSpeaking
+                  ? 'Stop speaking'
+                  : isListening
+                    ? 'Stop voice conversation'
+                    : 'Start voice conversation'
+            }
+          >
+            {isListening ? (
+              <X className="size-4" />
+            ) : isSpeaking ? (
+              <Volume2 className="size-4" />
+            ) : (
+              <Mic className="size-4" />
+            )}
+          </button>
+          <button
+            onClick={() => void submitCommand()}
+            disabled={!command.trim() || isBusy}
+            className="rounded-md bg-primary p-2 text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+            aria-label="Send command"
+          >
+            <ArrowUp className="size-4" />
+          </button>
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+        {suggestions.map((s) => (
+          <button
+            key={s.key}
+            onClick={() => pickSuggestion(s)}
+            disabled={!s.enabled}
+            title={s.enabled ? `Start: ${s.prompt}` : s.reason}
+            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition ${
+              s.enabled
+                ? 'border-border bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground'
+                : 'cursor-not-allowed border-dashed border-border text-muted-foreground/40'
+            }`}
+          >
+            <s.icon className="size-3.5" />
+            <span>{s.label}</span>
+            {!s.enabled && <span className="opacity-60">· {s.reason}</span>}
+          </button>
+        ))}
+      </div>
+      {(isListening || isSpeaking || voiceTranscript || !voiceSupported) && (
+        <div className="mt-3 rounded-md border border-border bg-muted/40 p-3 text-xs">
+          <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+            <span>
+              {!voiceSupported
+                ? 'Voice unavailable'
+                : isListening
+                  ? 'Listening'
+                  : isSpeaking
+                    ? 'Nexus speaking'
+                    : voiceTranscript
+                      ? 'Voice transcript'
+                      : 'Voice ready'}
+            </span>
+            {(isListening || isSpeaking) && (
+              <span className="size-2 animate-pulse rounded-full bg-primary" />
+            )}
+          </div>
+          {!voiceSupported ? (
+            <p className="mt-2 text-muted-foreground">
+              Your browser does not support speech recognition. Try Chrome or Edge.
+            </p>
+          ) : (
+            <p className="mt-2 leading-relaxed">
+              {voiceTranscript ||
+                (isSpeaking
+                  ? messages.filter((m) => m.role === 'nexus').slice(-1)[0]?.content?.slice(0, 240) ?? ''
+                  : 'Speak a command to Nexus.')}
+            </p>
+          )}
+          {isListening && (
+            <button
+              onClick={toggleVoice}
+              className="mt-3 inline-flex items-center gap-2 text-xs font-medium text-destructive hover:underline"
+            >
+              <X className="size-3.5" /> Stop listening
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
 
   return (
     <main className="min-h-screen bg-background text-foreground selection:bg-primary selection:text-primary-foreground">
@@ -527,22 +843,7 @@ export function NexusTerminal({ user }: { user: TerminalUser }) {
       <div className="mx-auto grid max-w-[1500px] lg:grid-cols-[220px_minmax(0,1fr)_280px]">
         <aside className="hidden border-r border-border p-5 lg:block">
           <button
-            onClick={() => {
-              const newId = `conv_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`
-              setConversationId(newId)
-              setMessages([
-                {
-                  id: mid(),
-                  role: 'nexus',
-                  content: "New conversation. What can I help with? Try 'help' to see capabilities.",
-                  meta: 'Nexus · new session',
-                },
-              ])
-              setTasks([])
-              setActivity([{ id: mid('a'), time: nowFmt(), title: 'Conversation opened', detail: 'New session' }])
-              setPendingApprovals([])
-              setHistory([])
-            }}
+            onClick={newConversation}
             className="mb-7 flex w-full items-center justify-center gap-2 rounded-md bg-primary px-3 py-2.5 text-sm font-medium text-primary-foreground shadow-sm transition hover:opacity-90"
           >
             <Plus className="size-4" /> New conversation
@@ -554,30 +855,67 @@ export function NexusTerminal({ user }: { user: TerminalUser }) {
             <a className="flex items-center gap-3 rounded-md bg-accent px-3 py-2.5 font-medium text-accent-foreground" href="#terminal">
               <Command className="size-4" /> Terminal
             </a>
-            <a className="flex items-center gap-3 rounded-md px-3 py-2.5 text-muted-foreground hover:bg-muted" href="#activity">
+            <button
+              onClick={() => setPanelModal('activity')}
+              className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left text-muted-foreground hover:bg-muted"
+            >
               <Activity className="size-4" /> Activity
-            </a>
-            <a className="flex items-center gap-3 rounded-md px-3 py-2.5 text-muted-foreground hover:bg-muted" href="#tasks">
+            </button>
+            <button
+              onClick={() => setPanelModal('tasks')}
+              className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left text-muted-foreground hover:bg-muted"
+            >
               <Check className="size-4" /> Tasks
-            </a>
+            </button>
           </nav>
-          <div className="mb-3 mt-9 font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
-            Recent
+          <div className="mb-3 mt-9 flex items-center justify-between font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+            <span>Conversations</span>
+            <button
+              onClick={() => void refreshConversations()}
+              className="text-[10px] normal-case tracking-normal text-primary hover:underline"
+            >
+              refresh
+            </button>
           </div>
-          <div className="space-y-1 text-xs text-muted-foreground">
-            {history.length === 0 ? (
-              <div className="px-3 py-2 italic opacity-70">No recent queries yet.</div>
+          <div className="relative mb-2">
+            <Search className="absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <input
+              value={conversationSearch}
+              onChange={(e) => setConversationSearch(e.target.value)}
+              placeholder="Search conversations…"
+              className="w-full rounded-md border border-border bg-muted/40 py-1.5 pl-8 pr-2 text-xs text-foreground outline-none placeholder:text-muted-foreground focus:border-primary"
+            />
+          </div>
+          <div className="max-h-[50vh] space-y-1 overflow-y-auto text-xs text-muted-foreground">
+            {!conversationsLoaded ? (
+              <div className="px-3 py-2 italic opacity-70">Loading…</div>
+            ) : conversations.length === 0 ? (
+              <div className="px-3 py-2 italic opacity-70">No saved conversations yet.</div>
             ) : (
-              history.map((h, i) => (
-                <button
-                  key={`${h}-${i}`}
-                  onClick={() => setCommand(h)}
-                  className="w-full truncate rounded px-3 py-2 text-left hover:bg-muted"
-                  title={h}
-                >
-                  {h}
-                </button>
-              ))
+              conversations
+                .filter((c) => {
+                  const q = conversationSearch.trim().toLowerCase()
+                  if (!q) return true
+                  const title = c.title && c.title !== 'New conversation' ? c.title : 'New conversation'
+                  const haystack = `${title} ${c.preview ?? ''}`.toLowerCase()
+                  return haystack.includes(q)
+                })
+                .map((c) => {
+                  const active = c.id === conversationId
+                  const title = c.title && c.title !== 'New conversation' ? c.title : 'New conversation'
+                  return (
+                    <button
+                      key={c.id}
+                      onClick={() => void loadConversation(c.id)}
+                      className={`w-full truncate rounded px-3 py-2 text-left hover:bg-muted ${
+                        active ? 'bg-accent font-medium text-accent-foreground' : ''
+                      }`}
+                      title={title}
+                    >
+                      {title}
+                    </button>
+                  )
+                })
             )}
           </div>
           <div className="mt-auto pt-40">
@@ -588,8 +926,12 @@ export function NexusTerminal({ user }: { user: TerminalUser }) {
           </div>
         </aside>
 
-        <section id="terminal" className="min-w-0 border-border lg:border-r">
-          <div className="flex items-center justify-between border-b border-border px-5 py-4 md:px-8">
+        <section
+          id="terminal"
+          className="flex min-w-0 flex-col border-border lg:border-r"
+          style={{ height: 'calc(100dvh - 4rem)' }}
+        >
+          <div className="flex shrink-0 items-center justify-between border-b border-border px-5 py-4 md:px-8">
             <div>
               <h1 className="font-mono text-sm font-semibold tracking-wide">/ terminal</h1>
               <p className="mt-1 text-xs text-muted-foreground">
@@ -600,161 +942,86 @@ export function NexusTerminal({ user }: { user: TerminalUser }) {
               <MoreHorizontal className="size-4" />
             </button>
           </div>
-          <div className="min-h-[460px] space-y-6 p-5 md:p-8">
-            {messages.map((message) => (
-              <MessageRow key={message.id} message={message} />
-            ))}
-            {isBusy && (
-              <div className="flex gap-3">
-                <LoaderCircle className="size-4 animate-spin text-muted-foreground mt-1.5" />
-                <div className="font-mono text-xs text-muted-foreground">Working…</div>
-              </div>
-            )}
-            {activeApproval && (
-              <ApprovalCard
-                key={activeApproval.id}
-                toolName={activeApproval.toolName}
-                title={activeApproval.summary?.title}
-                message={activeApproval.summary?.message}
-                subject={activeApproval.summary?.subject}
-                to={activeApproval.summary?.to}
-                onApprove={() => void resolveApproval(activeApproval.id, 'APPROVED')}
-                onCancel={() => void resolveApproval(activeApproval.id, 'REJECTED')}
-                busy={isBusy}
-              />
-            )}
-          </div>
-          <div className="sticky bottom-0 border-t border-border bg-card/95 p-4 md:p-6">
-            <div className="mx-auto max-w-3xl">
-              <div className="relative rounded-lg border border-input bg-background shadow-sm focus-within:ring-2 focus-within:ring-ring">
-                <textarea
-                  ref={inputRef}
-                  value={command}
-                  onChange={(event) => setCommand(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (
-                      event.key === 'Enter' &&
-                      !event.shiftKey &&
-                      !event.nativeEvent.isComposing &&
-                      (event as any).keyCode !== 229
-                    ) {
-                      event.preventDefault()
-                      void submitCommand()
-                    }
-                  }}
-                  placeholder="Type a command for Nexus… (try: help / time in Tokyo / add task: design review / search Next.js 16)"
-                  className="min-h-14 w-full resize-none bg-transparent px-4 pb-12 pt-3 text-sm outline-none placeholder:text-muted-foreground"
-                  aria-label="Command input"
-                  disabled={isBusy}
-                />
-                <div className="absolute bottom-2 left-3 flex items-center gap-1 text-[11px] text-muted-foreground">
-                  <kbd className="rounded border border-border px-1.5 py-0.5 font-mono">↵</kbd> send{' '}
-                  <span className="mx-1">·</span>
-                  <kbd className="rounded border border-border px-1.5 py-0.5 font-mono">⇧ ↵</kbd> new line
-                </div>
-                <div className="absolute bottom-2 right-2 flex items-center gap-1">
-                  <button
-                    onClick={isSpeaking ? stopSpeaking : toggleVoice}
-                    disabled={!voiceSupported || isBusy}
-                    className={`rounded-md p-2 ${
-                      isListening
-                        ? 'bg-destructive/10 text-destructive'
-                        : isSpeaking
-                          ? 'bg-primary/10 text-primary'
-                          : 'text-muted-foreground hover:bg-muted'
-                    } disabled:cursor-not-allowed disabled:opacity-40`}
-                    aria-label={
-                      !voiceSupported
-                        ? 'Voice input unsupported'
-                        : isSpeaking
-                          ? 'Stop speaking'
-                          : isListening
-                            ? 'Stop voice conversation'
-                            : 'Start voice conversation'
-                    }
-                  >
-                    {isListening ? (
-                      <X className="size-4" />
-                    ) : isSpeaking ? (
-                      <Volume2 className="size-4" />
-                    ) : (
-                      <Mic className="size-4" />
-                    )}
-                  </button>
-                  <button
-                    onClick={() => void submitCommand()}
-                    disabled={!command.trim() || isBusy}
-                    className="rounded-md bg-primary p-2 text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-                    aria-label="Send command"
-                  >
-                    <ArrowUp className="size-4" />
-                  </button>
-                </div>
-              </div>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                {suggestions.map((s) => (
-                  <button
-                    key={s.key}
-                    onClick={() => pickSuggestion(s)}
-                    disabled={!s.enabled}
-                    title={s.enabled ? `Start: ${s.prompt}` : s.reason}
-                    className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition ${
-                      s.enabled
-                        ? 'border-border bg-muted/40 text-muted-foreground hover:bg-muted hover:text-foreground'
-                        : 'cursor-not-allowed border-dashed border-border text-muted-foreground/40'
-                    }`}
-                  >
-                    <s.icon className="size-3.5" />
-                    <span>{s.label}</span>
-                    {!s.enabled && <span className="opacity-60">· {s.reason}</span>}
-                  </button>
-                ))}
-              </div>
-              {(isListening || isSpeaking || voiceTranscript || !voiceSupported) && (
-                <div className="mt-3 rounded-md border border-border bg-muted/40 p-3 text-xs">
-                  <div className="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-                    <span>
-                      {!voiceSupported
-                        ? 'Voice unavailable'
-                        : isListening
-                          ? 'Listening'
-                          : isSpeaking
-                            ? 'Nexus speaking'
-                            : voiceTranscript
-                              ? 'Voice transcript'
-                              : 'Voice ready'}
-                    </span>
-                    {(isListening || isSpeaking) && (
-                      <span className="size-2 animate-pulse rounded-full bg-primary" />
-                    )}
+
+          {isEmpty ? (
+            <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-7 overflow-y-auto p-6">
+              {messages.map((message) => (
+                <div key={message.id} className="flex w-full max-w-2xl flex-col items-center text-center">
+                  <div className="mb-1 inline-flex items-center gap-2 font-mono text-base font-semibold uppercase tracking-[0.22em] text-primary">
+                    <Sparkles className="size-4" /> Nexus AI and Automation
                   </div>
-                  {!voiceSupported ? (
-                    <p className="mt-2 text-muted-foreground">
-                      Your browser does not support speech recognition. Try Chrome or Edge.
-                    </p>
-                  ) : (
-                    <p className="mt-2 leading-relaxed">
-                      {voiceTranscript ||
-                        (isSpeaking
-                          ? messages
-                              .filter((m) => m.role === 'nexus')
-                              .slice(-1)[0]
-                              ?.content?.slice(0, 240) ?? ''
-                          : 'Speak a command to Nexus.')}
-                    </p>
-                  )}
-                  {isListening && (
-                    <button
-                      onClick={toggleVoice}
-                      className="mt-3 inline-flex items-center gap-2 text-xs font-medium text-destructive hover:underline"
-                    >
-                      <X className="size-3.5" /> Stop listening
-                    </button>
-                  )}
+                  <p className="mb-6 max-w-2xl text-sm leading-relaxed text-muted-foreground">
+                    {message.content}
+                  </p>
+                  <div className="grid w-full grid-cols-1 gap-2 text-left sm:grid-cols-2">
+                    {suggestions.map((s) => (
+                      <button
+                        key={s.key}
+                        onClick={() => runSuggestion(s)}
+                        disabled={!s.enabled}
+                        title={s.enabled ? `Start: ${s.prompt}` : s.reason}
+                        className={`flex items-start gap-3 rounded-lg border px-4 py-3 transition ${
+                          s.enabled
+                            ? 'border-border bg-card hover:bg-muted'
+                            : 'cursor-not-allowed border-dashed border-border bg-transparent'
+                        }`}
+                      >
+                        <span
+                          className={`mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md ${
+                            s.enabled ? 'bg-muted text-muted-foreground' : 'bg-muted/40 text-muted-foreground/40'
+                          }`}
+                        >
+                          <s.icon className="size-4" />
+                        </span>
+                        <span className="min-w-0">
+                          <span className={`block text-sm font-medium ${s.enabled ? 'text-foreground' : 'text-muted-foreground/40'}`}>
+                            {s.label}
+                          </span>
+                          {!s.enabled && (
+                            <span className="block text-[11px] text-muted-foreground/50">{s.reason}</span>
+                          )}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              )}
+              ))}
+              {inputForm}
             </div>
-          </div>
+          ) : (
+            <>
+              <div
+                ref={messagesRef}
+                className="min-h-0 flex-1 space-y-6 overflow-y-auto p-5 md:p-8"
+              >
+                {messages.map((message) => (
+                  <MessageRow key={message.id} message={message} />
+                ))}
+                {isBusy && (
+                  <div className="flex gap-3">
+                    <LoaderCircle className="size-4 animate-spin text-muted-foreground mt-1.5" />
+                    <div className="font-mono text-xs text-muted-foreground">Working…</div>
+                  </div>
+                )}
+                {activeApproval && (
+                  <ApprovalCard
+                    key={activeApproval.id}
+                    toolName={activeApproval.toolName}
+                    title={activeApproval.summary?.title}
+                    message={activeApproval.summary?.message}
+                    subject={activeApproval.summary?.subject}
+                    to={activeApproval.summary?.to}
+                    onApprove={() => void resolveApproval(activeApproval.id, 'APPROVED')}
+                    onCancel={() => void resolveApproval(activeApproval.id, 'REJECTED')}
+                    busy={isBusy}
+                  />
+                )}
+              </div>
+              <div className="shrink-0 border-t border-border bg-card/95 p-4 md:p-6">
+                {inputForm}
+              </div>
+            </>
+          )}
         </section>
 
         <aside className="hidden space-y-7 p-5 xl:block">
@@ -893,6 +1160,144 @@ export function NexusTerminal({ user }: { user: TerminalUser }) {
           </div>
         </aside>
       </div>
+
+      {panelModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setPanelModal(null)}>
+          <div
+            className="flex max-h-[80vh] w-full max-w-lg flex-col rounded-xl border border-border bg-background shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex shrink-0 items-center justify-between border-b border-border px-5 py-4">
+              <h2 className="flex items-center gap-2 font-mono text-sm font-semibold tracking-wide">
+                {panelModal === 'activity' ? <Activity className="size-4" /> : <Check className="size-4" />}
+                {panelModal === 'activity' ? 'All Activity' : 'All Tasks'}
+              </h2>
+              <button
+                onClick={() => setPanelModal(null)}
+                className="rounded-md p-2 text-muted-foreground hover:bg-muted"
+                aria-label="Close"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-5">
+              {panelModal === 'activity' ? (
+                globalActivity.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">No activity across conversations yet.</div>
+                ) : (
+                  <div className="space-y-1">
+                    {globalActivity.map((a) => {
+                      const expanded = expandedActivities.has(a.id)
+                      return (
+                        <div key={a.id} className="rounded-lg border border-border">
+                          <button
+                            onClick={() =>
+                              setExpandedActivities((cur) => {
+                                const next = new Set(cur)
+                                if (next.has(a.id)) next.delete(a.id)
+                                else next.add(a.id)
+                                return next
+                              })
+                            }
+                            className="flex w-full items-center gap-2 px-3 py-2 text-left hover:bg-muted"
+                          >
+                            <ChevronDown
+                              className={`size-3.5 shrink-0 text-muted-foreground transition-transform ${
+                                expanded ? 'rotate-180' : ''
+                              }`}
+                            />
+                            <span className="w-12 shrink-0 font-mono text-[10px] text-muted-foreground">{a.time}</span>
+                            <span className="min-w-0 flex-1 truncate text-sm font-medium capitalize">{a.title}</span>
+                          </button>
+                          {expanded && (
+                            <div className="border-t border-border px-3 py-2 text-xs text-muted-foreground">
+                              <div className="mb-1 capitalize">
+                                <span className="font-medium text-foreground">Type:</span> {a.kind}
+                              </div>
+                              {a.detail ? (
+                                <div className="break-words">
+                                  <span className="font-medium text-foreground">Details:</span> {a.detail}
+                                </div>
+                              ) : (
+                                <div>No additional details.</div>
+                              )}
+                              {a.conversationId && (
+                                <button
+                                  onClick={() => {
+                                    setPanelModal(null)
+                                    void loadConversation(a.conversationId as string)
+                                  }}
+                                  className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-primary hover:bg-muted"
+                                >
+                                  <MessageCircle className="size-3" /> Open conversation
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                )
+              ) : globalTasks.length === 0 ? (
+                <div className="text-sm text-muted-foreground">
+                  No tasks across conversations yet. Say{' '}
+                  <code className="rounded bg-muted px-1">add task: …</code> to create one.
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  {globalTasks.map((t) => (
+                    <div
+                      key={t.id}
+                      className={`flex items-center gap-3 rounded-lg border border-border px-3 py-2 ${
+                        t.status === 'completed' ? 'bg-muted/40' : ''
+                      }`}
+                    >
+                      <button
+                        onClick={() => void toggleTask(t)}
+                        disabled={isBusy}
+                        className={`flex size-5 shrink-0 items-center justify-center rounded-md border transition ${
+                          t.status === 'completed'
+                            ? 'border-emerald-500 bg-emerald-500 text-white'
+                            : 'border-border text-transparent hover:border-primary'
+                        }`}
+                        aria-label={t.status === 'completed' ? 'Mark undone' : 'Mark done'}
+                        title={t.status === 'completed' ? 'Mark undone' : 'Mark done'}
+                      >
+                        <Check className="size-3" />
+                      </button>
+                      <div className="min-w-0 flex-1">
+                        <div
+                          className={`text-sm ${
+                            t.status === 'completed' ? 'line-through text-muted-foreground' : ''
+                          }`}
+                        >
+                          {t.title}
+                        </div>
+                        <div className="mt-0.5 text-[11px] text-muted-foreground capitalize">
+                          {t.status.replace('_', ' ')}
+                          {t.dueAt ? ` · due ${new Date(t.dueAt).toLocaleDateString()}` : ''}
+                        </div>
+                      </div>
+                      {t.conversationId && (
+                        <button
+                          onClick={() => {
+                            setPanelModal(null)
+                            void loadConversation(t.conversationId as string)
+                          }}
+                          className="shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium text-primary hover:bg-muted"
+                        >
+                          Open conversation
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   )
 }
@@ -1016,10 +1421,10 @@ function IntegrationIcon({ name }: { name: string }) {
         : Mail
       : name === 'Web search'
         ? Globe2
-        : name === 'Telegram'
-          ? Send
-          : name === 'Phone calls'
-            ? Bell
+        : name === 'Phone calls'
+          ? Bell
+          : name === 'WhatsApp'
+            ? MessageCircle
             : name === 'Voice'
               ? Mic
               : Sparkles

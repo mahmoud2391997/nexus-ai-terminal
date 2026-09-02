@@ -16,8 +16,8 @@ const SAFE_TOOLS = new Set([
 const CONFIRMATION_REQUIRED_TOOLS = new Set([
   'createTask',
   'sendEmail',
+  'sendWhatsAppMessage',
   'draftEmail',
-  'sendTelegramMessage',
   'createCalendarEvent',
   'updateCalendarEvent',
   'cancelCalendarEvent',

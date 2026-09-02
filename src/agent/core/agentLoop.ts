@@ -1,6 +1,6 @@
 import { streamText, tool, zodSchema } from 'ai'
 import { buildSystemPrompt, getChatModel } from '@/src/lib/ai'
-import { createCalendarEventInput, createTaskInput, getCurrentTimeInput, searchWebInput, sendEmailInput } from '../tools'
+import { createCalendarEventInput, createTaskInput, getCurrentTimeInput, searchEmailsInput, searchWebInput, sendEmailInput, sendWhatsAppMessageInput } from '../tools'
 import type { ToolContext } from '../types'
 import { runTool } from './runner'
 import { addPendingApproval, type ChatMessage } from '../../lib/store'
@@ -13,7 +13,7 @@ export type AgentLoopResult =
 
 const MAX_STEPS = 5
 
-const APPROVAL_TOOLS = new Set(['createTask', 'sendEmail', 'createCalendarEvent'])
+const APPROVAL_TOOLS = new Set(['createTask', 'sendEmail', 'createCalendarEvent', 'sendWhatsAppMessage'])
 
 type AgentMessages = Array<{ role: 'system' | 'user' | 'assistant'; content: string }>
 
@@ -27,10 +27,20 @@ const agentTools = {
     description: 'Search the web for up-to-date information. Returns the top results with title, snippet and URL.',
     inputSchema: zodSchema(searchWebInput),
   }),
+  searchEmails: tool({
+    description:
+      'Search the user\'s Gmail mailbox for emails (e.g. "from:hr", "from:jobs subject:interview"). Returns the most recent matches with sender, subject, date and snippet. Requires a connected Gmail account with read access.',
+    inputSchema: zodSchema(searchEmailsInput),
+  }),
   sendEmail: tool({
     description:
       'Send an email via Gmail to a recipient. This action requires explicit user approval and a connected Gmail account.',
     inputSchema: zodSchema(sendEmailInput),
+  }),
+  sendWhatsAppMessage: tool({
+    description:
+      'Send a WhatsApp message to a phone number in international format (e.g. +14155550100) via WhatsApp Business API. This action requires explicit user approval and a configured WhatsApp connector. Use this for "message/WhatsApp/text" requests.',
+    inputSchema: zodSchema(sendWhatsAppMessageInput),
   }),
   createCalendarEvent: tool({
     description:
@@ -185,6 +195,11 @@ async function requestApproval(opts: {
       title: typeof raw.title === 'string' ? raw.title : undefined,
       message: `Create calendar event "${raw.title}"`,
     }
+  } else if (toolName === 'sendWhatsAppMessage') {
+    summary = {
+      to: typeof raw.to === 'string' ? raw.to : undefined,
+      message: `Send WhatsApp message to "${raw.to}"`,
+    }
   } else {
     const title = typeof raw.title === 'string' && raw.title.trim() ? raw.title.trim() : toolName
     summary = { title, message: `Run ${toolName}` }
@@ -211,7 +226,9 @@ function isKnownTool(name: string): boolean {
     name === 'getCurrentTime' ||
     name === 'createTask' ||
     name === 'searchWeb' ||
+    name === 'searchEmails' ||
     name === 'sendEmail' ||
+    name === 'sendWhatsAppMessage' ||
     name === 'createCalendarEvent'
   )
 }

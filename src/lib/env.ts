@@ -12,9 +12,9 @@ const OPTIONAL_VARS = [
   // Security
   'TOKEN_ENCRYPTION_KEY',
   // Integrations
-  'TELEGRAM_BOT_TOKEN',
   'PHONE_PROVIDER_API_KEY',
   'PHONE_PROVIDER_API_SECRET',
+  'WHATSAPP_FROM_NUMBER',
   // Voice
   'SPEECH_TO_TEXT_API_KEY',
   'TEXT_TO_SPEECH_API_KEY',
@@ -92,9 +92,9 @@ export const env = {
   tokenEncryptionKey: process.env.TOKEN_ENCRYPTION_KEY ?? '',
 
   // Integrations
-  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN ?? '',
   phoneProviderApiKey: process.env.PHONE_PROVIDER_API_KEY ?? '',
   phoneProviderApiSecret: process.env.PHONE_PROVIDER_API_SECRET ?? '',
+  whatsappFromNumber: process.env.WHATSAPP_FROM_NUMBER ?? '',
   speechToTextApiKey: process.env.SPEECH_TO_TEXT_API_KEY ?? '',
   textToSpeechApiKey: process.env.TEXT_TO_SPEECH_API_KEY ?? '',
   serperApiKey: process.env.SERPER_API_KEY ?? '',
@@ -105,7 +105,11 @@ export const env = {
   hasWebSearch: Boolean(
     process.env.WEB_SEARCH_API_KEY || process.env.SERPER_API_KEY || process.env.TAVILY_API_KEY,
   ),
-  hasTelegram: Boolean(process.env.TELEGRAM_BOT_TOKEN),
   hasPhone: Boolean(process.env.PHONE_PROVIDER_API_KEY && process.env.PHONE_PROVIDER_API_SECRET),
+  hasWhatsApp: Boolean(
+    process.env.PHONE_PROVIDER_API_KEY &&
+      process.env.PHONE_PROVIDER_API_SECRET &&
+      process.env.WHATSAPP_FROM_NUMBER,
+  ),
   hasVoice: Boolean(process.env.SPEECH_TO_TEXT_API_KEY && process.env.TEXT_TO_SPEECH_API_KEY),
 } as const

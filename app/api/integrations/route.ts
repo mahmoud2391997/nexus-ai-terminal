@@ -21,12 +21,6 @@ export async function GET() {
   }
 
   const email: IntegrationState = byProvider.has('google') ? (byProvider.get('google')!.status as IntegrationState) : 'not_connected'
-  const telegram: IntegrationState =
-    env.telegramBotToken && byProvider.has('telegram')
-      ? (byProvider.get('telegram')!.status as IntegrationState)
-      : env.telegramBotToken
-        ? 'connected'
-        : 'not_connected'
 
   const integrations = [
     {
@@ -42,16 +36,16 @@ export async function GET() {
       requires: 'Google OAuth',
     },
     {
+      name: 'WhatsApp',
+      state: env.hasWhatsApp ? 'connected' : 'not_connected',
+      detail: env.hasWhatsApp ? 'Ready via Twilio' : 'Not connected',
+      requires: 'PHONE_PROVIDER_API_KEY/SECRET + WHATSAPP_FROM_NUMBER',
+    },
+    {
       name: 'Web search',
       state: env.hasWebSearch ? 'connected' : 'not_connected',
       detail: env.hasWebSearch ? 'Live results enabled' : 'Fallback dataset',
       requires: 'SERPER_API_KEY / TAVILY_API_KEY',
-    },
-    {
-      name: 'Telegram',
-      state: telegram as IntegrationState,
-      detail: stateLabel(telegram as IntegrationState),
-      requires: 'TELEGRAM_BOT_TOKEN',
     },
     {
       name: 'Phone calls',

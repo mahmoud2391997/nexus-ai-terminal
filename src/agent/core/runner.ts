@@ -1,6 +1,6 @@
 import { prisma } from '@/src/lib/db'
 import type { ToolContext, ToolResult } from '../types'
-import { createCalendarEventInput, createTaskInput, getCurrentTimeInput, searchWebInput, sendEmailInput, toolRegistry } from '../tools'
+import { createCalendarEventInput, createTaskInput, getCurrentTimeInput, searchEmailsInput, searchWebInput, sendEmailInput, sendWhatsAppMessageInput, toolRegistry } from '../tools'
 import {
   buildIdempotencyKey,
   createToolExecution,
@@ -18,7 +18,7 @@ export type RunToolResult = {
   error?: string
 }
 
-const IDEMPOTENT_TOOLS = new Set(['createTask', 'sendEmail', 'sendTelegramMessage', 'createCalendarEvent', 'initiatePhoneCall'])
+const IDEMPOTENT_TOOLS = new Set(['createTask', 'sendEmail', 'createCalendarEvent', 'initiatePhoneCall', 'sendWhatsAppMessage'])
 
 export async function runTool(
   toolName: keyof typeof toolRegistry,
@@ -58,12 +58,12 @@ export async function runTool(
     result = (await tool.execute(input as never, context)) as ToolResult<unknown>
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    await failExecution(context.userId, execution.id, message)
+    await failExecution(context.userId, execution.id, message, context.conversationId)
     return { ok: false, executionId: execution.id, error: message }
   }
 
   if (!result.ok) {
-    await failExecution(context.userId, execution.id, result.error)
+    await failExecution(context.userId, execution.id, result.error, context.conversationId)
     return { ok: false, executionId: execution.id, error: result.error }
   }
 
@@ -72,6 +72,7 @@ export async function runTool(
   await prisma.auditLog.create({
     data: {
       userId: context.userId,
+      conversationId: context.conversationId || undefined,
       actorType: 'ai',
       action: 'tool_completed',
       targetType: 'tool_execution',
@@ -83,11 +84,17 @@ export async function runTool(
   return { ok: true, executionId: execution.id, data: result.data }
 }
 
-async function failExecution(userId: string, executionId: string, error: string): Promise<void> {
+async function failExecution(
+  userId: string,
+  executionId: string,
+  error: string,
+  conversationId?: string,
+): Promise<void> {
   await finishExecution(userId, executionId, null, error)
   await prisma.auditLog.create({
     data: {
       userId,
+      conversationId: conversationId || undefined,
       actorType: 'ai',
       action: 'tool_failed',
       targetType: 'tool_execution',
@@ -112,8 +119,12 @@ function schemaForTool(toolName: keyof typeof toolRegistry): z.ZodType | null {
       return createTaskInput
     case 'searchWeb':
       return searchWebInput
+    case 'searchEmails':
+      return searchEmailsInput
     case 'sendEmail':
       return sendEmailInput
+    case 'sendWhatsAppMessage':
+      return sendWhatsAppMessageInput
     case 'createCalendarEvent':
       return createCalendarEventInput
     default:

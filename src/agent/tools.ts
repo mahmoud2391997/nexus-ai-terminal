@@ -1,8 +1,10 @@
 import { z } from 'zod'
 import type { ToolContext, ToolDefinition, ToolResult } from './types'
 import { addTask, addActivity } from './store'
-import { sendGmailEmail } from '@/src/lib/gmail'
+import { sendGmailEmail, searchGmailEmails } from '@/src/lib/gmail'
 import { createGoogleCalendarEvent } from '@/src/lib/calendar'
+import { assertGoogleScope } from '@/src/lib/google'
+import { sendTwilioWhatsAppMessage } from '@/src/lib/whatsapp'
 
 export const getCurrentTimeInput = z.object({ timezone: z.string().min(1).max(80).default('UTC') })
 export const createTaskInput = z.object({
@@ -11,10 +13,23 @@ export const createTaskInput = z.object({
   status: z.enum(['queued', 'in_progress', 'completed']).default('queued'),
 })
 export const searchWebInput = z.object({ query: z.string().trim().min(2).max(500) })
+export const searchEmailsInput = z.object({
+  query: z.string().trim().min(1).max(300),
+  maxResults: z.number().int().min(1).max(25).optional(),
+})
 export const sendEmailInput = z.object({
   to: z.string().email('A valid recipient email address is required.'),
   subject: z.string().trim().min(1).max(200),
   body: z.string().trim().min(1).max(20000),
+})
+export const sendWhatsAppMessageInput = z.object({
+  to: z
+    .string()
+    .trim()
+    .min(7)
+    .max(20)
+    .regex(/^\+?[\d\s().-]+$/, 'A valid international phone number is required (e.g. +14155550100).'),
+  body: z.string().trim().min(1).max(4096),
 })
 export const createCalendarEventInput = z.object({
   title: z.string().trim().min(1).max(200),
@@ -32,7 +47,13 @@ export type SearchWebOut = {
   results: Array<{ title: string; snippet: string; url: string; source: string }>
   note?: string
 }
+export type SearchEmailsOut = {
+  query: string
+  totalResults: number
+  messages: Array<{ id: string; from?: string; subject?: string; date?: string; snippet?: string }>
+}
 export type SendEmailOut = { messageId: string; to: string; subject: string }
+export type SendWhatsAppMessageOut = { sid: string; to: string }
 export type CreateCalendarEventOut = { id: string; htmlLink: string; title: string; start: string; timeZone: string }
 
 export const getCurrentTime: ToolDefinition<z.infer<typeof getCurrentTimeInput>, GetCurrentTimeOut> = {
@@ -118,7 +139,7 @@ async function performWebSearch(query: string): Promise<SearchWebOut['results']>
   return []
 }
 
-async function searchWebImpl(parsed: { query: string }, context: ToolContext): Promise<SearchWebOut> {
+async function searchWebImpl(parsed: { query: string }, context: ToolContext): Promise<ToolResult<SearchWebOut>> {
   const hasExternalKey = Boolean(
     process.env.SERPER_API_KEY || process.env.WEB_SEARCH_API_KEY || process.env.TAVILY_API_KEY,
   )
@@ -186,6 +207,28 @@ export const sendEmail: ToolDefinition<z.infer<typeof sendEmailInput>, SendEmail
   },
 }
 
+export const sendWhatsAppMessage: ToolDefinition<z.infer<typeof sendWhatsAppMessageInput>, SendWhatsAppMessageOut> = {
+  name: 'sendWhatsAppMessage',
+  description:
+    'Send a WhatsApp message to a phone number via Twilio (WhatsApp Business API). Requires the WhatsApp connector to be configured (PHONE_PROVIDER_API_KEY/SECRET + WHATSAPP_FROM_NUMBER), and requires explicit user approval before the message is sent. Numbers must be in international format, e.g. +14155550100.',
+  requiresApproval: true,
+  async execute(input, context: ToolContext) {
+    const parsed = sendWhatsAppMessageInput.parse(input)
+    if (!context.userId) return { ok: false, code: 'UNAUTHENTICATED', error: 'A user session is required.' }
+    const result = await sendTwilioWhatsAppMessage(context.userId, {
+      to: parsed.to,
+      body: parsed.body,
+    })
+    addActivity({
+      conversationId: context.conversationId,
+      kind: 'tool',
+      title: 'Sent WhatsApp message',
+      detail: `to ${parsed.to}`,
+    })
+    return { ok: true, data: { sid: result.sid, to: parsed.to } }
+  },
+}
+
 export const createCalendarEvent: ToolDefinition<z.infer<typeof createCalendarEventInput>, CreateCalendarEventOut> = {
   name: 'createCalendarEvent',
   description:
@@ -221,7 +264,29 @@ export const createCalendarEvent: ToolDefinition<z.infer<typeof createCalendarEv
   },
 }
 
-export const toolRegistry = { getCurrentTime, createTask, searchWeb, sendEmail, createCalendarEvent } as const
+export const searchEmails: ToolDefinition<z.infer<typeof searchEmailsInput>, SearchEmailsOut> = {
+  name: 'searchEmails',
+  description:
+    'Search the user\'s Gmail mailbox for emails matching a Gmail search query (e.g. "from:hr", "from:jobs subject:interview"). Returns the most recent matches with sender, subject, date and a snippet. Requires a connected Gmail account with read access.',
+  async execute(input, context: ToolContext) {
+    const parsed = searchEmailsInput.parse(input)
+    if (!context.userId) return { ok: false, code: 'UNAUTHENTICATED', error: 'A user session is required.' }
+    await assertGoogleScope(context.userId, 'https://www.googleapis.com/auth/gmail.readonly')
+    const { results, totalResults } = await searchGmailEmails(context.userId, {
+      query: parsed.query,
+      maxResults: parsed.maxResults,
+    })
+    addActivity({
+      conversationId: context.conversationId,
+      kind: 'tool',
+      title: 'Searched email',
+      detail: `"${parsed.query}" · ${results.length} result(s)`,
+    })
+    return { ok: true, data: { query: parsed.query, totalResults, messages: results } }
+  },
+}
+
+export const toolRegistry = { getCurrentTime, createTask, searchWeb, sendEmail, createCalendarEvent, searchEmails, sendWhatsAppMessage } as const
 
 export async function executeTool(
   toolName: keyof typeof toolRegistry,

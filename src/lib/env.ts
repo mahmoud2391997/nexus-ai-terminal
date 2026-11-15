@@ -5,7 +5,7 @@ const DEMO = process.env.DEMO_MODE === 'true' || process.env.DEMO_MODE === '1'
 
 // Demo mode needs no sign-in, so Google OAuth credentials are not required.
 const REQUIRED_VARS = (
-  DEMO ? ['DATABASE_URL'] : ['DATABASE_URL', 'AUTH_SECRET', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET']
+  DEMO ? [] : ['DATABASE_URL', 'AUTH_SECRET', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET']
 ) as readonly string[]
 
 const OPTIONAL_VARS = [
@@ -43,6 +43,10 @@ export function validateEnv(): { valid: boolean; errors: string[]; warnings: str
     if (!process.env[varName]) {
       warnings.push(`Optional environment variable not set: ${varName} (related feature is disabled)`)
     }
+  }
+
+  if (!process.env.DATABASE_URL && DEMO) {
+    warnings.push('DATABASE_URL not set: demo mode will use non-persistent in-memory storage')
   }
 
   if (process.env.DATABASE_URL && !process.env.DATABASE_URL.startsWith('postgresql://')) {

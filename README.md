@@ -181,7 +181,7 @@ MIT
 Deploy to Vercel with these env vars and share the link:
 
 - `DEMO_MODE=true`
-- `DATABASE_URL` — any Postgres (Neon / Vercel Postgres / Supabase). `vercel-build` runs `prisma migrate deploy` automatically.
+- `DATABASE_URL` — any Postgres (Neon / Vercel Postgres / Supabase); `vercel-build` runs `prisma migrate deploy` when it is set. **If unset, the app falls back to in-memory storage** (works with no database, but data resets on restarts and is not shared across serverless instances).
 - Optional: `OPENAI_API_KEY` or `MISTRAL_API_KEY` (live LLM), `SERPER_API_KEY` (live search).
 
 Each visitor gets an isolated guest user via an httpOnly cookie. Google sign-in, `AUTH_SECRET` and Google OAuth vars aren't needed. Leave phone/WhatsApp keys unset on a public demo.

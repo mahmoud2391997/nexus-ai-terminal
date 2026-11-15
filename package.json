@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "vercel-build": "prisma generate && prisma migrate deploy && next build",
+    "vercel-build": "prisma generate && (if [ -n \"$DATABASE_URL\" ]; then prisma migrate deploy; else echo 'No DATABASE_URL: skipping migrations (in-memory demo)'; fi) && next build",
     "start": "next start",
     "test": "jest",
     "test:unit": "jest",

@@ -158,7 +158,7 @@ function activityVisual(a: { title: string; kind?: string; detail?: string }): {
   return { Icon: Activity, dot: 'bg-muted-foreground/60', tone: 'text-muted-foreground' }
 }
 
-export function NexusTerminal({ user }: { user: TerminalUser }) {
+export function NexusTerminal({ user, demo = false }: { user: TerminalUser; demo?: boolean }) {
   const [messages, setMessages] = useState<Message[]>([
     { id: mid(), role: 'nexus', content: "I'll help you get things done — schedule events, manage your calendar, send and search emails, send WhatsApp messages, create tasks, and search the web.", meta: 'Nexus · welcome' },
   ])
@@ -836,7 +836,13 @@ export function NexusTerminal({ user }: { user: TerminalUser }) {
             </div>
           )}
           <span className="hidden md:block">{user.name || user.email || 'User'}</span>
-          <SignOutButton />
+          {demo ? (
+            <span className="rounded-md border border-border px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+              Demo
+            </span>
+          ) : (
+            <SignOutButton />
+          )}
         </div>
       </header>
 

@@ -174,3 +174,14 @@ Additional tools (Gmail, Calendar, Telegram, Phone, automations) are **not** stu
 ## License
 
 MIT
+
+
+## Public demo (no sign-in)
+
+Deploy to Vercel with these env vars and share the link:
+
+- `DEMO_MODE=true`
+- `DATABASE_URL` — any Postgres (Neon / Vercel Postgres / Supabase). `vercel-build` runs `prisma migrate deploy` automatically.
+- Optional: `OPENAI_API_KEY` or `MISTRAL_API_KEY` (live LLM), `SERPER_API_KEY` (live search).
+
+Each visitor gets an isolated guest user via an httpOnly cookie. Google sign-in, `AUTH_SECRET` and Google OAuth vars aren't needed. Leave phone/WhatsApp keys unset on a public demo.

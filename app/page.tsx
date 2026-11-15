@@ -1,8 +1,19 @@
 import { auth } from '@/src/lib/auth'
 import { NexusTerminal } from '@/components/nexus-terminal'
 import { SignInButton } from '@/components/auth-buttons'
+import { getSessionUserId } from '@/src/lib/session'
+import { isDemoMode } from '@/src/lib/demo'
+
+export const dynamic = 'force-dynamic'
 
 export default async function Page() {
+  if (isDemoMode()) {
+    const id = await getSessionUserId()
+    if (id) {
+      return <NexusTerminal user={{ id, name: 'Demo', email: null, image: null }} demo />
+    }
+  }
+
   const session = await auth()
   const user = {
     id: typeof session?.user?.id === 'string' ? session.user.id : null,

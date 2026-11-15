@@ -1,7 +1,9 @@
+import { isDemoMode } from './demo'
+
 // Environment variable validation.
 // Fail fast on missing required vars; degrade gracefully on missing optional ones.
 
-const DEMO = process.env.DEMO_MODE === 'true' || process.env.DEMO_MODE === '1'
+const DEMO = isDemoMode()
 
 // Demo mode needs no sign-in, so Google OAuth credentials are not required.
 const REQUIRED_VARS = (

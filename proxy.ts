@@ -1,11 +1,11 @@
 import { NextResponse, type NextRequest } from 'next/server'
+import { isDemoMode } from './src/lib/demo'
 
 // Demo mode: make sure every visitor has a guest cookie BEFORE the page/API runs
 // (server components cannot set cookies). The cookie is also injected into the
 // current request so the first render already sees it.
 export function proxy(request: NextRequest) {
-  const demo = process.env.DEMO_MODE === 'true' || process.env.DEMO_MODE === '1'
-  if (!demo) return NextResponse.next()
+  if (!isDemoMode()) return NextResponse.next()
 
   const existing = request.cookies.get('nexus_demo')?.value
   if (existing && /^[a-f0-9]{32}$/.test(existing)) return NextResponse.next()

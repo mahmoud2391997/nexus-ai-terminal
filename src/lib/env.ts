@@ -1,7 +1,12 @@
 // Environment variable validation.
 // Fail fast on missing required vars; degrade gracefully on missing optional ones.
 
-const REQUIRED_VARS = ['DATABASE_URL', 'AUTH_SECRET', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET'] as const
+const DEMO = process.env.DEMO_MODE === 'true' || process.env.DEMO_MODE === '1'
+
+// Demo mode needs no sign-in, so Google OAuth credentials are not required.
+const REQUIRED_VARS = (
+  DEMO ? ['DATABASE_URL'] : ['DATABASE_URL', 'AUTH_SECRET', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET']
+) as readonly string[]
 
 const OPTIONAL_VARS = [
   // AI / LLM
